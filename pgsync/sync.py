@@ -355,30 +355,11 @@ class Sync(Base, metaclass=Singleton):
     ) -> None:
         """
         Process changes from the db logical replication logs.
-
+    
         Here, we are grouping all rows of the same table and tg_op
         and processing them as a group in bulk.
         This is more efficient.
-        e.g [
-            {'tg_op': INSERT, 'table': A, ...},
-            {'tg_op': INSERT, 'table': A, ...},
-            {'tg_op': INSERT, 'table': A, ...},
-            {'tg_op': DELETE, 'table': A, ...},
-            {'tg_op': DELETE, 'table': A, ...},
-            {'tg_op': INSERT, 'table': A, ...},
-            {'tg_op': INSERT, 'table': A, ...},
-        ]
-
-        We will have 3 groups being synced together in one execution
-        First 3 INSERT, Next 2 DELETE and then the next 2 INSERT.
-        Perhaps this could be improved but this is the best approach so far.
-
-        TODO: We can also process all INSERTS together and rearrange
-        them as done below
         """
-        # minimize the tmp file disk usage when calling
-        # PG_LOGICAL_SLOT_PEEK_CHANGES and PG_LOGICAL_SLOT_GET_CHANGES
-        # by limiting to a smaller batch size.
         while True:
             changes: int = self.logical_slot_peek_changes(
                 self.__name,
@@ -389,59 +370,45 @@ class Sync(Base, metaclass=Singleton):
             )
             if not changes:
                 break
-
+    
             rows: list = []
             for row in changes:
-                if re.search(r"^BEGIN", row.data) or re.search(
-                    r"^COMMIT", row.data
-                ):
+                if re.search(r"^BEGIN", row.data) or re.search(r"^COMMIT", row.data):
                     continue
                 rows.append(row)
-
+    
             payloads: t.List[Payload] = []
-            for i, row in enumerate(rows):
+            current_op = None
+            current_table = None
+    
+            for row in rows:
                 logger.debug(f"txid: {row.xid}")
                 logger.debug(f"data: {row.data}")
-                # TODO: optimize this so we are not parsing the same row twice
+    
                 try:
                     payload: Payload = self.parse_logical_slot(row.data)
                 except Exception as e:
-                    logger.exception(
-                        f"Error parsing row: {e}\nRow data: {row.data}"
-                    )
+                    logger.exception(f"Error parsing row: {e}\nRow data: {row.data}")
                     raise
-
-                # filter out unknown schemas
+    
                 if payload.schema not in self.tree.schemas:
                     continue
-
+    
+                if current_op is None:
+                    current_op = payload.tg_op
+                    current_table = payload.table
+    
+                if payload.tg_op != current_op or payload.table != current_table:
+                    self.search_client.bulk(self.index, self._payloads(payloads))
+                    payloads = []
+                    current_op = payload.tg_op
+                    current_table = payload.table
+    
                 payloads.append(payload)
-
-                j: int = i + 1
-                if j < len(rows):
-                    try:
-                        payload2: Payload = self.parse_logical_slot(
-                            rows[j].data
-                        )
-                    except Exception as e:
-                        logger.exception(
-                            f"Error parsing row: {e}\nRow data: {rows[j].data}"
-                        )
-                        raise
-
-                    if (
-                        payload.tg_op != payload2.tg_op
-                        or payload.table != payload2.table
-                    ):
-                        self.search_client.bulk(
-                            self.index, self._payloads(payloads)
-                        )
-                        payloads: list = []
-                elif j == len(rows):
-                    self.search_client.bulk(
-                        self.index, self._payloads(payloads)
-                    )
-                    payloads: list = []
+    
+            if payloads:
+                self.search_client.bulk(self.index, self._payloads(payloads))
+    
             self.logical_slot_get_changes(
                 self.__name,
                 txmin=txmin,
