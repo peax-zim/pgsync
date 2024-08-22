@@ -173,8 +173,6 @@ class SearchClient(object):
         ignore_status: t.Tuple[int],
     ):
         """Bulk index, update, delete docs to Elasticsearch/OpenSearch."""
-        actions_list = list(actions)
-        logger.debug(f"actions: {actions_list}")
         if settings.ELASTICSEARCH_STREAMING_BULK:
             for ok, info in self.streaming_bulk(
                 self.__client,
