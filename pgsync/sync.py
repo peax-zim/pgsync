@@ -792,6 +792,7 @@ class Sync(Base, metaclass=Singleton):
         node: Node = self.tree.get_node(payload.table, payload.schema)
 
         for payload in payloads:
+            logger.debug(f"payload x data: {payload.data}")
             # this is only required for the non truncate tg_ops
             if payload.data:
                 if not set(node.model.primary_keys).issubset(
